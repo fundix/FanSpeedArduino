@@ -12,6 +12,13 @@
 // Doba skenování (0 = kontinuální)
 #define SCAN_TIME_MS 0
 
+const float WHEEL_CIRCUMFERENCE = 2.146; // [m]
+
+// Globální proměnné pro uchování předchozího měření (pro výpočet rychlosti)
+uint32_t previousCumulativeRevs = 0;
+uint16_t previousLastEventTime = 0;
+bool firstMeasurement = true;
+
 // Globální proměnné
 static bool doConnect = false;
 static const NimBLEAdvertisedDevice *advDevice;
@@ -109,7 +116,7 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
   Serial.print("Flags: 0x");
   Serial.println(flags, HEX);
 
-  // Pokud je nastaven bit 0 – data o otáčkách kola jsou přítomna
+  // Pokud je nastaven bit 0 – jsou přítomna kolečková data
   if (flags & 0x01)
   {
     if (length < 7)
@@ -117,43 +124,91 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
       Serial.println("Nedostatek bajtů pro kolečková data");
       return;
     }
-    // Čtyři bajty: kumulativní počet otáček (little-endian)
-    uint32_t cumulativeWheelRevs = (uint32_t)data[1] | ((uint32_t)data[2] << 8) | ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
-    // Dva bajty: čas poslední události (little-endian, jednotky 1/1024 s)
-    uint16_t lastWheelEventTime = data[5] | (data[6] << 8);
+    // Načtení kumulativního počtu otáček (4 bajty, little-endian)
+    uint32_t currentCumulativeRevs = (uint32_t)data[1] | ((uint32_t)data[2] << 8) | ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
+    // Načtení času poslední události (2 bajty, little-endian; jednotky 1/1024 s)
+    uint16_t currentLastEventTime = data[5] | (data[6] << 8);
 
     Serial.print("Kumulativní otáčky kola: ");
-    Serial.println(cumulativeWheelRevs);
+    Serial.println(currentCumulativeRevs);
     Serial.print("Čas poslední události: ");
-    Serial.print(lastWheelEventTime);
+    Serial.print(currentLastEventTime);
     Serial.print(" (");
-    Serial.print(lastWheelEventTime / 1024.0, 2);
+    Serial.print(currentLastEventTime / 1024.0, 2);
     Serial.println(" sec)");
+
+    // Výpočet rychlosti, pokud nejde o první měření
+    if (!firstMeasurement)
+    {
+      uint32_t deltaRevs = currentCumulativeRevs - previousCumulativeRevs;
+
+      // Výpočet rozdílu času s ošetřením přetečení (max. hodnota 2^16 = 65536)
+      uint16_t deltaTime;
+      if (currentLastEventTime >= previousLastEventTime)
+      {
+        deltaTime = currentLastEventTime - previousLastEventTime;
+      }
+      else
+      {
+        deltaTime = currentLastEventTime + (65536 - previousLastEventTime);
+      }
+      float deltaTimeSec = deltaTime / 1024.0;
+
+      if (deltaTimeSec > 0)
+      {
+        float distance = deltaRevs * WHEEL_CIRCUMFERENCE; // ujetá vzdálenost v metrech
+        float speed_mps = distance / deltaTimeSec;        // rychlost v m/s
+        float speed_kmph = speed_mps * 3.6;               // rychlost v km/h
+
+        Serial.print("Delta revolucí: ");
+        Serial.println(deltaRevs);
+        Serial.print("Delta času: ");
+        Serial.print(deltaTimeSec, 2);
+        Serial.println(" sec");
+        Serial.print("Rychlost: ");
+        Serial.print(speed_mps, 2);
+        Serial.print(" m/s, ");
+        Serial.print(speed_kmph, 2);
+        Serial.println(" km/h");
+      }
+      else
+      {
+        Serial.println("Delta času je nula, nelze vypočítat rychlost.");
+      }
+    }
+    else
+    {
+      Serial.println("První měření, nelze spočítat rychlost.");
+      firstMeasurement = false;
+    }
+
+    // Aktualizace předchozích hodnot pro další měření
+    previousCumulativeRevs = currentCumulativeRevs;
+    previousLastEventTime = currentLastEventTime;
   }
 
-  // Pokud by byl nastaven bit 1 – data o šlapacích (crank) otáčkách, lze je dekódovat následovně:
+  // Případné zpracování dat pro šlapací (crank) otáčky, pokud je nastaven bit 1 (rozšíření dle specifikace)
   if (flags & 0x02)
   {
-    if (length < 11)
+    if (length >= 11)
     {
-      Serial.println("Nedostatek bajtů pro šlapací data");
-      return;
+      uint16_t crankRevs = data[7] | (data[8] << 8);
+      uint16_t lastCrankEventTime = data[9] | (data[10] << 8);
+      Serial.print("Crank otáčky: ");
+      Serial.println(crankRevs);
+      Serial.print("Čas posledního crank eventu: ");
+      Serial.print(lastCrankEventTime);
+      Serial.print(" (");
+      Serial.print(lastCrankEventTime / 1024.0, 2);
+      Serial.println(" sec)");
     }
-    uint16_t crankRevs = data[7] | (data[8] << 8);
-    uint16_t lastCrankEventTime = data[9] | (data[10] << 8);
-    Serial.print("Crank otáčky: ");
-    Serial.println(crankRevs);
-    Serial.print("Čas posledního crank eventu: ");
-    Serial.print(lastCrankEventTime);
-    Serial.print(" (");
-    Serial.print(lastCrankEventTime / 1024.0, 2);
-    Serial.println(" sec)");
   }
 }
 
 void setup()
 {
   Serial.begin(115200);
+  vTaskDelay(2000 / portTICK_PERIOD_MS); // Zpoždění pro připojení sériového monitoru
   Serial.println("Spouštím BLE klienta pro SIGMA SPEED 17197...");
 
   // Inicializace BLE
@@ -212,6 +267,8 @@ void loop()
       pCSCCharacteristic->subscribe(true,
                                     [](NimBLERemoteCharacteristic *pChar, uint8_t *data, size_t length, bool isNotify)
                                     {
+                                      Serial.print("Obdržena notifikace, délka: ");
+                                      Serial.println(length);
                                       decodeCSCMeasurement(data, length);
                                     });
     }
