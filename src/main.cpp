@@ -1,6 +1,9 @@
 #include <Arduino.h>
+#include <FastLED.h>
 #include <NimBLEDevice.h>
 #include "NimBLEClient.h"
+#include "esp_log.h"
+#define TAG "BLE_CLIENT"
 
 // Cílový název zařízení
 #define TARGET_DEVICE_NAME "SIGMA SPEED 17197"
@@ -19,24 +22,40 @@ uint32_t previousCumulativeRevs = 0;
 uint16_t previousLastEventTime = 0;
 bool firstMeasurement = true;
 
+// PWM definice
+#define PWM_GPIO 5
+#define PWM_CHANNEL 0
+#define PWM_FREQUENCY 5000 // 5 kHz
+#define PWM_RESOLUTION 8   // 8bit (0-255)
+
+// WS2812 LED definice
+#define LED_PIN 35
+#define NUM_LEDS 1
+CRGB leds[NUM_LEDS];
+
+// Rychlostní limity
+#define MIN_SPEED 3.0f  // km/h, pod tuto hodnotu PWM = 0%
+#define MAX_SPEED 30.0f // km/h, při této hodnotě PWM = 100%
+
 // Globální proměnné
 static bool doConnect = false;
 static const NimBLEAdvertisedDevice *advDevice;
 NimBLEClient *pClient = nullptr;
 NimBLERemoteCharacteristic *pCSCCharacteristic = nullptr;
 
+void setPWM(float speed);
+
 // Callback pro klientské události
 class MyClientCallbacks : public NimBLEClientCallbacks
 {
   void onConnect(NimBLEClient *pClient) override
   {
-    Serial.println("Připojeno k zařízení");
+    ESP_LOGI(TAG, "Připojeno k zařízení");
   }
 
   void onDisconnect(NimBLEClient *pClient, int reason) override
   {
-    Serial.print("Odpojeno, důvod: ");
-    Serial.println(reason);
+    ESP_LOGI(TAG, "Odpojeno, důvod: %d", reason);
     // Resetujeme příznaky a opětovně spustíme skenování
     doConnect = false;
     advDevice = nullptr;
@@ -45,15 +64,14 @@ class MyClientCallbacks : public NimBLEClientCallbacks
 
   void onPassKeyEntry(NimBLEConnInfo &connInfo) override
   {
-    Serial.println("Vyžadován PassKey");
+    ESP_LOGI(TAG, "Vyžadován PassKey");
     // Pokud by zařízení vyžadovalo spárování s PINem, můžeme jej zde zadat.
     NimBLEDevice::injectPassKey(connInfo, 123456);
   }
 
   void onConfirmPasskey(NimBLEConnInfo &connInfo, uint32_t pass_key) override
   {
-    Serial.print("Potvrzuji PassKey: ");
-    Serial.println(pass_key);
+    ESP_LOGI(TAG, "Potvrzuji PassKey: %d", pass_key);
     NimBLEDevice::injectConfirmPasskey(connInfo, true);
   }
 
@@ -61,7 +79,7 @@ class MyClientCallbacks : public NimBLEClientCallbacks
   {
     if (!connInfo.isEncrypted())
     {
-      Serial.println("Šifrované spojení selhalo, odpojuji se");
+      ESP_LOGI(TAG, "Šifrované spojení selhalo, odpojuji se");
       NimBLEDevice::getClientByHandle(connInfo.getConnHandle())->disconnect();
     }
   }
@@ -76,11 +94,10 @@ class ScanCallbacks : public NimBLEScanCallbacks
     if (advertisedDevice->haveName())
     {
       String devName = advertisedDevice->getName().c_str();
-      Serial.print("Nalezeno zařízení: ");
-      Serial.println(devName);
+      ESP_LOGI(TAG, "Nalezeno zařízení: %s", devName.c_str());
       if (devName == TARGET_DEVICE_NAME)
       {
-        Serial.println("Nalezeno cílové zařízení!");
+        ESP_LOGI(TAG, "Nalezeno cílové zařízení!");
         advDevice = advertisedDevice;
         doConnect = true;
         NimBLEDevice::getScan()->stop();
@@ -89,39 +106,24 @@ class ScanCallbacks : public NimBLEScanCallbacks
   }
 } scanCallbacks;
 
-// Callback pro notifikace z charakteristiky CSC
-// class MyCSCCharacteristicCallbacks : public NimBLECharacteristicCallbacks
-// {
-//   void onNotify(NimBLECharacteristic *pCharacteristic) override
-//   {
-//     std::string value = pCharacteristic->getValue();
-//     Serial.print("Obdržena notifikace, délka: ");
-//     Serial.println(value.length());
-//     decodeCSCMeasurement((uint8_t *)value.data(), value.length());
-//   }
-// };
-
 // Funkce pro dekódování CSC měření
-// Dekóduje primárně kolečková data (flag bit 0)
-// Pokud by byl nastaven také bit 1, lze dle specifikace rozšířit dekódování o data z šlapání.
 void decodeCSCMeasurement(uint8_t *data, size_t length)
 {
   if (length < 1)
   {
-    Serial.println("Nebyla obdržena žádná data");
+    ESP_LOGI(TAG, "Nebyla obdržena žádná data");
     return;
   }
 
   uint8_t flags = data[0];
-  Serial.print("Flags: 0x");
-  Serial.println(flags, HEX);
+  ESP_LOGI(TAG, "Flags: 0x%02X", flags);
 
   // Pokud je nastaven bit 0 – jsou přítomna kolečková data
   if (flags & 0x01)
   {
     if (length < 7)
     {
-      Serial.println("Nedostatek bajtů pro kolečková data");
+      ESP_LOGI(TAG, "Nedostatek bajtů pro kolečková data");
       return;
     }
     // Načtení kumulativního počtu otáček (4 bajty, little-endian)
@@ -129,13 +131,8 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
     // Načtení času poslední události (2 bajty, little-endian; jednotky 1/1024 s)
     uint16_t currentLastEventTime = data[5] | (data[6] << 8);
 
-    Serial.print("Kumulativní otáčky kola: ");
-    Serial.println(currentCumulativeRevs);
-    Serial.print("Čas poslední události: ");
-    Serial.print(currentLastEventTime);
-    Serial.print(" (");
-    Serial.print(currentLastEventTime / 1024.0, 2);
-    Serial.println(" sec)");
+    ESP_LOGI(TAG, "Kumulativní otáčky kola: %u", currentCumulativeRevs);
+    ESP_LOGI(TAG, "Čas poslední události: %u (%0.2f sec)", currentLastEventTime, currentLastEventTime / 1024.0);
 
     // Výpočet rychlosti, pokud nejde o první měření
     if (!firstMeasurement)
@@ -160,25 +157,24 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
         float speed_mps = distance / deltaTimeSec;        // rychlost v m/s
         float speed_kmph = speed_mps * 3.6;               // rychlost v km/h
 
-        Serial.print("Delta revolucí: ");
-        Serial.println(deltaRevs);
-        Serial.print("Delta času: ");
-        Serial.print(deltaTimeSec, 2);
-        Serial.println(" sec");
-        Serial.print("Rychlost: ");
-        Serial.print(speed_mps, 2);
-        Serial.print(" m/s, ");
-        Serial.print(speed_kmph, 2);
-        Serial.println(" km/h");
+        if (speed_kmph > 0)
+        {
+          setPWM(speed_kmph);
+        }
+
+        ESP_LOGI(TAG, "Delta revolucí: %u", deltaRevs);
+        ESP_LOGI(TAG, "Delta času: %0.2f sec", deltaTimeSec);
+        ESP_LOGI(TAG, "Rychlost: %0.2f m/s, %0.2f km/h", speed_mps, speed_kmph);
       }
       else
       {
-        Serial.println("Delta času je nula, nelze vypočítat rychlost.");
+        ESP_LOGI(TAG, "Delta času je nula, nelze vypočítat rychlost.");
+        setPWM(0);
       }
     }
     else
     {
-      Serial.println("První měření, nelze spočítat rychlost.");
+      ESP_LOGI(TAG, "První měření, nelze spočítat rychlost.");
       firstMeasurement = false;
     }
 
@@ -194,22 +190,45 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
     {
       uint16_t crankRevs = data[7] | (data[8] << 8);
       uint16_t lastCrankEventTime = data[9] | (data[10] << 8);
-      Serial.print("Crank otáčky: ");
-      Serial.println(crankRevs);
-      Serial.print("Čas posledního crank eventu: ");
-      Serial.print(lastCrankEventTime);
-      Serial.print(" (");
-      Serial.print(lastCrankEventTime / 1024.0, 2);
-      Serial.println(" sec)");
+      ESP_LOGI(TAG, "Crank otáčky: %u", crankRevs);
+      ESP_LOGI(TAG, "Čas posledního crank eventu: %u (%0.2f sec)", lastCrankEventTime, lastCrankEventTime / 1024.0);
     }
   }
+}
+
+void setPWM(float speed)
+{
+  uint8_t pwm_value = 0;
+
+  if (speed >= MIN_SPEED)
+  {
+    // Přepočet rychlosti na PWM výkon (20-100%)
+    float pwm_percent = 20.0f + ((speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 80.0f;
+    if (pwm_percent > 100.0f)
+      pwm_percent = 100.0f;
+
+    pwm_value = (uint8_t)((pwm_percent / 100.0f) * 255);
+  } else {
+    pwm_value = 0;
+  }
+
+  // Nastavení PWM na GPIO5
+  ledcWrite(PWM_CHANNEL, pwm_value);
+  ESP_LOGI(TAG, "PWM value: %d (%.1f%%)", pwm_value, (pwm_value / 255.0f) * 100);
+
+  // Nastavení barvy na WS2812 podle PWM výkonu
+  uint8_t red = map(pwm_value, 51, 255, 0, 255); // 20% (51) → zelená, 100% (255) → červená
+  uint8_t green = map(pwm_value, 51, 255, 255, 0);
+  leds[0] = CRGB(red, green, 0);
+  FastLED.show();
+  ESP_LOGI(TAG, "LED color: R=%d, G=%d, B=0", red, green);
 }
 
 void setup()
 {
   Serial.begin(115200);
   vTaskDelay(2000 / portTICK_PERIOD_MS); // Zpoždění pro připojení sériového monitoru
-  Serial.println("Spouštím BLE klienta pro SIGMA SPEED 17197...");
+  ESP_LOGI(TAG, "Spouštím BLE klienta pro SIGMA SPEED 17197...");
 
   // Inicializace BLE
   NimBLEDevice::init("");
@@ -223,6 +242,15 @@ void setup()
   pScan->setWindow(15);
   pScan->setActiveScan(true);
   pScan->start(SCAN_TIME_MS, false, false);
+
+  // Inicializace PWM na GPIO5
+  ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+  ledcAttachPin(PWM_GPIO, PWM_CHANNEL);
+
+  // Inicializace WS2812C-2020 na GPIO35
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.clear();
+  FastLED.show();
 }
 
 void loop()
@@ -230,23 +258,23 @@ void loop()
   // Pokud bylo nalezeno cílové zařízení, pokusíme se o připojení
   if (doConnect && advDevice)
   {
-    Serial.println("Pokus o připojení k cílovému zařízení...");
+    ESP_LOGI(TAG, "Pokus o připojení k cílovému zařízení...");
     pClient = NimBLEDevice::createClient();
     pClient->setClientCallbacks(new MyClientCallbacks(), false);
 
     if (!pClient->connect(advDevice))
     {
-      Serial.println("Připojení se nezdařilo!");
+      ESP_LOGI(TAG, "Připojení se nezdařilo!");
       NimBLEDevice::getScan()->start(SCAN_TIME_MS, false, false);
       return;
     }
 
-    Serial.println("Úspěšně připojeno!");
+    ESP_LOGI(TAG, "Úspěšně připojeno!");
     // Hledáme službu CSC (UUID: 1816)
     NimBLERemoteService *pService = pClient->getService(CSC_SERVICE_UUID);
     if (!pService)
     {
-      Serial.println("Služba CSC (1816) nebyla nalezena!");
+      ESP_LOGI(TAG, "Služba CSC (1816) nebyla nalezena!");
       pClient->disconnect();
       return;
     }
@@ -255,7 +283,7 @@ void loop()
     pCSCCharacteristic = pService->getCharacteristic(CSC_CHAR_UUID);
     if (!pCSCCharacteristic)
     {
-      Serial.println("Charakteristika CSC (2A5B) nebyla nalezena!");
+      ESP_LOGI(TAG, "Charakteristika CSC (2A5B) nebyla nalezena!");
       pClient->disconnect();
       return;
     }
@@ -263,18 +291,17 @@ void loop()
     // Pokud podporuje notifikace, přihlásíme se
     if (pCSCCharacteristic->canNotify())
     {
-      Serial.println("Přihlašuji se na notifikace z CSC charakteristiky...");
+      ESP_LOGI(TAG, "Přihlašuji se na notifikace z CSC charakteristiky...");
       pCSCCharacteristic->subscribe(true,
                                     [](NimBLERemoteCharacteristic *pChar, uint8_t *data, size_t length, bool isNotify)
                                     {
-                                      Serial.print("Obdržena notifikace, délka: ");
-                                      Serial.println(length);
+                                      ESP_LOGI(TAG, "Obdržena notifikace, délka: %d", length);
                                       decodeCSCMeasurement(data, length);
                                     });
     }
     else
     {
-      Serial.println("Charakteristika nepodporuje notifikace!");
+      ESP_LOGI(TAG, "Charakteristika nepodporuje notifikace!");
     }
 
     // Po úspěšném připojení resetujeme příznak
