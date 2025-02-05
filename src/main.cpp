@@ -208,7 +208,9 @@ void setPWM(float speed)
       pwm_percent = 100.0f;
 
     pwm_value = (uint8_t)((pwm_percent / 100.0f) * 255);
-  } else {
+  }
+  else
+  {
     pwm_value = 0;
   }
 
@@ -216,12 +218,21 @@ void setPWM(float speed)
   ledcWrite(PWM_CHANNEL, pwm_value);
   ESP_LOGI(TAG, "PWM value: %d (%.1f%%)", pwm_value, (pwm_value / 255.0f) * 100);
 
-  // Nastavení barvy na WS2812 podle PWM výkonu
-  uint8_t red = map(pwm_value, 51, 255, 0, 255); // 20% (51) → zelená, 100% (255) → červená
-  uint8_t green = map(pwm_value, 51, 255, 255, 0);
-  leds[0] = CRGB(red, green, 0);
+  // Nastavení barvy WS2812
+  if (pwm_value == 0)
+  {
+    leds[0] = CRGB::Black; // LED zhasnutá při PWM = 0
+  }
+  else
+  {
+    // Přechod od zelené (nízké PWM) přes oranžovou k červené (vysoké PWM)
+    uint8_t red = map(pwm_value, 51, 255, 0, 255);   // 20% (51) → 0, 100% (255) → 255
+    uint8_t green = map(pwm_value, 51, 255, 255, 0); // 20% (51) → 255, 100% (255) → 0
+    leds[0] = CRGB(red, green, 0);
+  }
+
   FastLED.show();
-  ESP_LOGI(TAG, "LED color: R=%d, G=%d, B=0", red, green);
+  ESP_LOGI(TAG, "LED color: R=%d, G=%d, B=0", leds[0].r, leds[0].g);
 }
 
 void setup()
