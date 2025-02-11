@@ -25,8 +25,8 @@ bool firstMeasurement = true;
 // PWM definice
 #define PWM_GPIO 5
 #define PWM_CHANNEL 0
-#define PWM_FREQUENCY 5000 // 5 kHz
-#define PWM_RESOLUTION 8   // 8bit (0-255)
+#define PWM_FREQUENCY 10000 // 15 kHz
+#define PWM_RESOLUTION 8    // 8bit (0-255)
 
 // WS2812 LED definice
 #define LED_PIN 35
@@ -35,7 +35,7 @@ CRGB leds[NUM_LEDS];
 
 // Rychlostní limity
 #define MIN_SPEED 3.0f  // km/h, pod tuto hodnotu PWM = 0%
-#define MAX_SPEED 30.0f // km/h, při této hodnotě PWM = 100%
+#define MAX_SPEED 35.0f // km/h, při této hodnotě PWM = 100%
 
 // Globální proměnné
 static bool doConnect = false;
@@ -202,8 +202,10 @@ void setPWM(float speed)
 
   if (speed >= MIN_SPEED)
   {
-    // Přepočet rychlosti na PWM výkon (20-100%)
-    float pwm_percent = 20.0f + ((speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 80.0f;
+    // Přepočet rychlosti na PWM výkon s kvadratickou nelinearitou
+    float normalizedSpeed = (speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+    float pwm_percent = 2.0f + (normalizedSpeed * normalizedSpeed) * 98.0f; // Kvadratická interpolace
+
     if (pwm_percent > 100.0f)
       pwm_percent = 100.0f;
 
@@ -226,8 +228,24 @@ void setPWM(float speed)
   else
   {
     // Přechod od zelené (nízké PWM) přes oranžovou k červené (vysoké PWM)
-    uint8_t red = map(pwm_value, 51, 255, 0, 255);   // 20% (51) → 0, 100% (255) → 255
-    uint8_t green = map(pwm_value, 51, 255, 255, 0); // 20% (51) → 255, 100% (255) → 0
+    // Pokud pwm_value je mimo rozsah 1-255, omezíme jej
+    uint8_t value = pwm_value < 1 ? 1 : (pwm_value > 255 ? 255 : pwm_value);
+    uint8_t red, green;
+    // Použijeme dvojúrovňovou interpolaci:
+    // V rozsahu 1-127: přechod z čisté zelené (0,255,0) na oranžovou (255,165,0)
+    // V rozsahu 128-255: přechod z oranžové (255,165,0) na červenou (255,0,0)
+    if (value <= 127)
+    {
+      float factor = (value - 1) / 126.0f;
+      red = (uint8_t)(factor * 255);
+      green = (uint8_t)(255 - factor * (255 - 165));
+    }
+    else
+    {
+      float factor = (value - 128) / 127.0f;
+      red = 255;
+      green = (uint8_t)(165 - factor * 165);
+    }
     leds[0] = CRGB(red, green, 0);
   }
 
@@ -320,5 +338,5 @@ void loop()
   }
 
   // V hlavní smyčce lze případně zpracovávat další logiku
-  delay(1000);
+  delay(250);
 }
