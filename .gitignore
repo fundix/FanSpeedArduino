@@ -31,3 +31,6 @@
 *.out
 *.app
 .pio
+lib/FastLED/.github
+.DS_Store
+.vscode

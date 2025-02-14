@@ -5,6 +5,11 @@
 #include "esp_log.h"
 #define TAG "BLE_CLIENT"
 
+#ifdef ATOMS3
+#include "M5GFX.h"
+#include "M5Unified.h"
+#endif
+
 // Cílový název zařízení
 #define TARGET_DEVICE_NAME "SIGMA SPEED 17197"
 
@@ -42,6 +47,8 @@ static bool doConnect = false;
 static const NimBLEAdvertisedDevice *advDevice;
 NimBLEClient *pClient = nullptr;
 NimBLERemoteCharacteristic *pCSCCharacteristic = nullptr;
+
+float speed_kmph = 0.0f;
 
 void setPWM(float speed);
 
@@ -155,7 +162,7 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
       {
         float distance = deltaRevs * WHEEL_CIRCUMFERENCE; // ujetá vzdálenost v metrech
         float speed_mps = distance / deltaTimeSec;        // rychlost v m/s
-        float speed_kmph = speed_mps * 3.6;               // rychlost v km/h
+        speed_kmph = speed_mps * 3.6;                     // rychlost v km/h
 
         if (speed_kmph > 0)
         {
@@ -170,6 +177,7 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
       {
         ESP_LOGI(TAG, "Delta času je nula, nelze vypočítat rychlost.");
         setPWM(0);
+        speed_kmph = 0;
       }
     }
     else
@@ -255,6 +263,22 @@ void setPWM(float speed)
 
 void setup()
 {
+#ifdef ATOMS3
+  M5.begin();
+  M5.Display.begin();
+
+  M5.Display.setBrightness(25);
+  M5.Display.setRotation(1);
+  M5.Display.setTextColor(RED, BLACK);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setFont(&fonts::FreeSans12pt7b);
+  M5.Display.setTextSize(1);
+
+  // M5.Display.fillRect(0, 0, 240, 135, BLACK);
+  // M5.Display.setCursor(10, 20);
+  // M5.Display.print("Bat:");
+#endif
+
   Serial.begin(115200);
   vTaskDelay(2000 / portTICK_PERIOD_MS); // Zpoždění pro připojení sériového monitoru
   ESP_LOGI(TAG, "Spouštím BLE klienta pro SIGMA SPEED 17197...");
@@ -338,5 +362,10 @@ void loop()
   }
 
   // V hlavní smyčce lze případně zpracovávat další logiku
+
+  M5.Display.setTextSize(3);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.drawString(String(speed_kmph, 0), M5.Display.width() / 2, M5.Display.height() / 2);
+  // #endif
   delay(250);
 }
