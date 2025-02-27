@@ -1,19 +1,23 @@
+#ifndef ATOMS3
+#define ATOMS3
+#endif
+
 #include <Arduino.h>
+#ifndef ATOMS3
 #include <FastLED.h>
+#endif
 #include <NimBLEDevice.h>
 #include "NimBLEClient.h"
 #include "esp_log.h"
 #define TAG "BLE_CLIENT"
-
-#ifndef ATOMS3
-#define ATOMS3
-#endif
 
 #ifdef ATOMS3
 #include "M5GFX.h"
 #include "M5Unified.h"
 
 M5Canvas canvas(&M5.Display);
+
+#define BTN1 41
 
 #endif
 
@@ -39,12 +43,14 @@ bool firstMeasurement = true;
 #define PWM_GPIO 38
 #define PWM_CHANNEL 0
 #define PWM_FREQUENCY 5000 // 5 kHz
-#define PWM_RESOLUTION 10  // 8bit (0-255)
+#define PWM_RESOLUTION 10  // 10bit (0-1023)
 
+#ifndef ATOMS3
 // WS2812 LED definice
 #define LED_PIN 35
 #define NUM_LEDS 1
 CRGB leds[NUM_LEDS];
+#endif
 
 // Rychlostní limity
 #define MIN_SPEED 3.0f  // km/h, pod tuto hodnotu PWM = 0%
@@ -219,25 +225,23 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
 
 void setPWM(float speed)
 {
-  uint8_t pwm_value = 0;
+  uint16_t pwm_value = 0;
 
   if (speed >= MIN_SPEED)
   {
     // Přepočet rychlosti na PWM výkon s kvadratickou nelinearitou
     float normalizedSpeed = (speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
-    pwm_percent = 2.0f + (normalizedSpeed * normalizedSpeed) * 98.0f; // Kvadratická interpolace
+    pwm_percent = 4.0f + (normalizedSpeed * normalizedSpeed) * 98.0f; // Kvadratická interpolace
 
     if (pwm_percent > 100.0f)
       pwm_percent = 100.0f;
 
-    pwm_value = (uint8_t)((pwm_percent / 100.0f) * 1023);
-
-    if (pwm_value > 1000)
-      pwm_value = 1023;
+    pwm_value = (uint16_t)((pwm_percent / 100.0f) * 1023);
   }
   else
   {
     pwm_value = 0;
+    pwm_percent = 0.0f;
   }
 
   // Nastavení PWM na GPIO5
@@ -326,6 +330,13 @@ void setup()
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
   FastLED.clear();
   FastLED.show();
+  // Setup button on GPIO41 for AtomS3
+
+#endif
+
+#ifdef ATOMS3
+  pinMode(BTN1, INPUT_PULLUP);
+
 #endif
 }
 
@@ -428,7 +439,7 @@ void drawGUI()
 
   canvas.setFont(&fonts::FreeSans18pt7b);
   canvas.setTextSize(0.5);
-  canvas.drawString(String(pwm_percent, 1), centerX, 107);
+  canvas.drawString(String(pwm_percent, 0), centerX, 107);
   // canvas.drawString("100", centerX - 1, 107);
 
   canvas.pushSprite(0, 0);
