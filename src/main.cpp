@@ -20,43 +20,41 @@ M5Canvas canvas(&M5.Display);
 #define BTN1 41
 
 #endif
-
-// Cílový název zařízení
+// Target device name
 // #define TARGET_DEVICE_NAME "SIGMA SPEED 17197"
 #define TARGET_DEVICE_NAME "SIGMA SPEED"
 
-// UUID služby CSC a měřící charakteristiky
+// UUID of CSC service and measurement characteristic
 #define CSC_SERVICE_UUID "1816"
 #define CSC_CHAR_UUID "2A5B"
 
-// Doba skenování (0 = kontinuální)
+// Scan duration (0 = continuous)
 #define SCAN_TIME_MS 0
 
 const float WHEEL_CIRCUMFERENCE = 2.146; // [m]
 
-// Globální proměnné pro uchování předchozího měření (pro výpočet rychlosti)
+// Global variables for storing previous measurement (for speed calculation)
 uint32_t previousCumulativeRevs = 0;
 uint16_t previousLastEventTime = 0;
 bool firstMeasurement = true;
 
-// PWM definice
+// PWM definitions
 #define PWM_GPIO 38
 #define PWM_CHANNEL 0
-#define PWM_FREQUENCY 5000 // 5 kHz
-#define PWM_RESOLUTION 10  // 10bit (0-1023)
+#define PWM_FREQUENCY 10000 // 10 kHz
+#define PWM_RESOLUTION 10   // 10bit (0-1023)
 
 #ifndef ATOMS3
-// WS2812 LED definice
+// WS2812 LED definitions
 #define LED_PIN 35
 #define NUM_LEDS 1
 CRGB leds[NUM_LEDS];
 #endif
 
-// Rychlostní limity
-#define MIN_SPEED 3.0f  // km/h, pod tuto hodnotu PWM = 0%
-#define MAX_SPEED 35.0f // km/h, při této hodnotě PWM = 100%
-
-// Globální proměnné
+// Speed limits
+#define MIN_SPEED 3.0f  // km/h, below this value PWM = 0%
+#define MAX_SPEED 35.0f // km/h, at this value PWM = 100%
+// Global variables
 static bool doConnect = false;
 static const NimBLEAdvertisedDevice *advDevice;
 NimBLEClient *pClient = nullptr;
@@ -68,18 +66,18 @@ float pwm_percent = 0.0f;
 void setPWM(float speed);
 void drawGUI();
 
-// Callback pro klientské události
+// Client event callbacks
 class MyClientCallbacks : public NimBLEClientCallbacks
 {
   void onConnect(NimBLEClient *pClient) override
   {
-    ESP_LOGI(TAG, "Připojeno k zařízení");
+    ESP_LOGI(TAG, "Connected to device");
   }
 
   void onDisconnect(NimBLEClient *pClient, int reason) override
   {
-    ESP_LOGI(TAG, "Odpojeno, důvod: %d", reason);
-    // Resetujeme příznaky a opětovně spustíme skenování
+    ESP_LOGI(TAG, "Disconnected, reason: %d", reason);
+    // Reset flags and restart scanning
     doConnect = false;
     advDevice = nullptr;
     NimBLEDevice::getScan()->start(SCAN_TIME_MS, false, false);
@@ -87,14 +85,14 @@ class MyClientCallbacks : public NimBLEClientCallbacks
 
   void onPassKeyEntry(NimBLEConnInfo &connInfo) override
   {
-    ESP_LOGI(TAG, "Vyžadován PassKey");
-    // Pokud by zařízení vyžadovalo spárování s PINem, můžeme jej zde zadat.
+    ESP_LOGI(TAG, "PassKey required");
+    // If device requires pairing with PIN, we can enter it here
     NimBLEDevice::injectPassKey(connInfo, 123456);
   }
 
   void onConfirmPasskey(NimBLEConnInfo &connInfo, uint32_t pass_key) override
   {
-    ESP_LOGI(TAG, "Potvrzuji PassKey: %d", pass_key);
+    ESP_LOGI(TAG, "Confirming PassKey: %d", pass_key);
     NimBLEDevice::injectConfirmPasskey(connInfo, true);
   }
 
@@ -102,25 +100,25 @@ class MyClientCallbacks : public NimBLEClientCallbacks
   {
     if (!connInfo.isEncrypted())
     {
-      ESP_LOGI(TAG, "Šifrované spojení selhalo, odpojuji se");
+      ESP_LOGI(TAG, "Encrypted connection failed, disconnecting");
       NimBLEDevice::getClientByHandle(connInfo.getConnHandle())->disconnect();
     }
   }
 };
 
-// Callback pro skenování
+// Scanning callback
 class ScanCallbacks : public NimBLEScanCallbacks
 {
   void onResult(const NimBLEAdvertisedDevice *advertisedDevice) override
   {
-    // Kontrola, zda zařízení má název a zda se shoduje s cílovým
+    // Check if device has name and if it matches target
     if (advertisedDevice->haveName())
     {
       String devName = advertisedDevice->getName().c_str();
-      ESP_LOGI(TAG, "Nalezeno zařízení: %s", devName.c_str());
+      ESP_LOGI(TAG, "Device found: %s", devName.c_str());
       if (devName.startsWith(TARGET_DEVICE_NAME))
       {
-        ESP_LOGI(TAG, "Nalezeno cílové zařízení!");
+        ESP_LOGI(TAG, "Target device found!");
         advDevice = advertisedDevice;
         doConnect = true;
         NimBLEDevice::getScan()->stop();
@@ -129,40 +127,40 @@ class ScanCallbacks : public NimBLEScanCallbacks
   }
 } scanCallbacks;
 
-// Funkce pro dekódování CSC měření
+// Function for decoding CSC measurement
 void decodeCSCMeasurement(uint8_t *data, size_t length)
 {
   if (length < 1)
   {
-    ESP_LOGI(TAG, "Nebyla obdržena žádná data");
+    ESP_LOGI(TAG, "No data received");
     return;
   }
 
   uint8_t flags = data[0];
   ESP_LOGI(TAG, "Flags: 0x%02X", flags);
 
-  // Pokud je nastaven bit 0 – jsou přítomna kolečková data
+  // If bit 0 is set - wheel data is present
   if (flags & 0x01)
   {
     if (length < 7)
     {
-      ESP_LOGI(TAG, "Nedostatek bajtů pro kolečková data");
+      ESP_LOGI(TAG, "Not enough bytes for wheel data");
       return;
     }
-    // Načtení kumulativního počtu otáček (4 bajty, little-endian)
+    // Read cumulative wheel revolutions (4 bytes, little-endian)
     uint32_t currentCumulativeRevs = (uint32_t)data[1] | ((uint32_t)data[2] << 8) | ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
-    // Načtení času poslední události (2 bajty, little-endian; jednotky 1/1024 s)
+    // Read last event time (2 bytes, little-endian; units 1/1024 s)
     uint16_t currentLastEventTime = data[5] | (data[6] << 8);
 
-    ESP_LOGI(TAG, "Kumulativní otáčky kola: %u", currentCumulativeRevs);
-    ESP_LOGI(TAG, "Čas poslední události: %u (%0.2f sec)", currentLastEventTime, currentLastEventTime / 1024.0);
+    ESP_LOGI(TAG, "Cumulative wheel revolutions: %u", currentCumulativeRevs);
+    ESP_LOGI(TAG, "Last event time: %u (%0.2f sec)", currentLastEventTime, currentLastEventTime / 1024.0);
 
-    // Výpočet rychlosti, pokud nejde o první měření
+    // Calculate speed if not first measurement
     if (!firstMeasurement)
     {
       uint32_t deltaRevs = currentCumulativeRevs - previousCumulativeRevs;
 
-      // Výpočet rozdílu času s ošetřením přetečení (max. hodnota 2^16 = 65536)
+      // Calculate time difference handling overflow (max value 2^16 = 65536)
       uint16_t deltaTime;
       if (currentLastEventTime >= previousLastEventTime)
       {
@@ -176,9 +174,9 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
 
       if (deltaTimeSec > 0)
       {
-        float distance = deltaRevs * WHEEL_CIRCUMFERENCE; // ujetá vzdálenost v metrech
-        float speed_mps = distance / deltaTimeSec;        // rychlost v m/s
-        speed_kmph = speed_mps * 3.6;                     // rychlost v km/h
+        float distance = deltaRevs * WHEEL_CIRCUMFERENCE; // distance in meters
+        float speed_mps = distance / deltaTimeSec;        // speed in m/s
+        speed_kmph = speed_mps * 3.6;                     // speed in km/h
 
         if (speed_kmph > 99)
           speed_kmph = 99;
@@ -188,50 +186,49 @@ void decodeCSCMeasurement(uint8_t *data, size_t length)
           setPWM(speed_kmph);
         }
 
-        ESP_LOGI(TAG, "Delta revolucí: %u", deltaRevs);
-        ESP_LOGI(TAG, "Delta času: %0.2f sec", deltaTimeSec);
-        ESP_LOGI(TAG, "Rychlost: %0.2f m/s, %0.2f km/h", speed_mps, speed_kmph);
+        ESP_LOGI(TAG, "Delta revolutions: %u", deltaRevs);
+        ESP_LOGI(TAG, "Delta time: %0.2f sec", deltaTimeSec);
+        ESP_LOGI(TAG, "Speed: %0.2f m/s, %0.2f km/h", speed_mps, speed_kmph);
       }
       else
       {
-        ESP_LOGI(TAG, "Delta času je nula, nelze vypočítat rychlost.");
+        ESP_LOGI(TAG, "Delta time is zero, cannot calculate speed.");
         setPWM(0);
         speed_kmph = 0;
       }
     }
     else
     {
-      ESP_LOGI(TAG, "První měření, nelze spočítat rychlost.");
+      ESP_LOGI(TAG, "First measurement, cannot calculate speed.");
       firstMeasurement = false;
     }
 
-    // Aktualizace předchozích hodnot pro další měření
+    // Update previous values for next measurement
     previousCumulativeRevs = currentCumulativeRevs;
     previousLastEventTime = currentLastEventTime;
   }
 
-  // Případné zpracování dat pro šlapací (crank) otáčky, pokud je nastaven bit 1 (rozšíření dle specifikace)
+  // Process crank data if bit 1 is set (extension per specification)
   if (flags & 0x02)
   {
     if (length >= 11)
     {
       uint16_t crankRevs = data[7] | (data[8] << 8);
       uint16_t lastCrankEventTime = data[9] | (data[10] << 8);
-      ESP_LOGI(TAG, "Crank otáčky: %u", crankRevs);
-      ESP_LOGI(TAG, "Čas posledního crank eventu: %u (%0.2f sec)", lastCrankEventTime, lastCrankEventTime / 1024.0);
+      ESP_LOGI(TAG, "Crank revolutions: %u", crankRevs);
+      ESP_LOGI(TAG, "Last crank event time: %u (%0.2f sec)", lastCrankEventTime, lastCrankEventTime / 1024.0);
     }
   }
 }
-
 void setPWM(float speed)
 {
   uint16_t pwm_value = 0;
 
   if (speed >= MIN_SPEED)
   {
-    // Přepočet rychlosti na PWM výkon s kvadratickou nelinearitou
+    // Convert speed to PWM power with quadratic non-linearity
     float normalizedSpeed = (speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
-    pwm_percent = 4.0f + (normalizedSpeed * normalizedSpeed) * 98.0f; // Kvadratická interpolace
+    pwm_percent = 4.0f + (normalizedSpeed * normalizedSpeed) * 98.0f; // Quadratic interpolation
 
     if (pwm_percent > 100.0f)
       pwm_percent = 100.0f;
@@ -244,25 +241,25 @@ void setPWM(float speed)
     pwm_percent = 0.0f;
   }
 
-  // Nastavení PWM na GPIO5
+  // Set PWM on GPIO5
   ledcWrite(PWM_CHANNEL, pwm_value);
   ESP_LOGI(TAG, "PWM value: %d (%.1f%%)", pwm_value, (pwm_value / 1023.0f) * 100);
 
 #ifndef ATOMS3
-  // Nastavení barvy WS2812
+  // Set WS2812 color
   if (pwm_value == 0)
   {
-    leds[0] = CRGB::Black; // LED zhasnutá při PWM = 0
+    leds[0] = CRGB::Black; // LED off when PWM = 0
   }
   else
   {
-    // Přechod od zelené (nízké PWM) přes oranžovou k červené (vysoké PWM)
-    // Pokud pwm_value je mimo rozsah 1-255, omezíme jej
+    // Transition from green (low PWM) through orange to red (high PWM)
+    // If pwm_value is out of 1-255 range, limit it
     uint8_t value = pwm_value < 1 ? 1 : (pwm_value > 255 ? 255 : pwm_value);
     uint8_t red, green;
-    // Použijeme dvojúrovňovou interpolaci:
-    // V rozsahu 1-127: přechod z čisté zelené (0,255,0) na oranžovou (255,165,0)
-    // V rozsahu 128-255: přechod z oranžové (255,165,0) na červenou (255,0,0)
+    // Use two-level interpolation:
+    // Range 1-127: transition from pure green (0,255,0) to orange (255,165,0)
+    // Range 128-255: transition from orange (255,165,0) to red (255,0,0)
     if (value <= 127)
     {
       float factor = (value - 1) / 126.0f;
@@ -290,27 +287,18 @@ void setup()
   M5.Display.begin();
 
   M5.Display.setBrightness(35);
-  // M5.Display.setRotation(1);
-  // M5.Display.setTextColor(RED, BLACK);
-  // M5.Display.setTextDatum(middle_center);
-  // M5.Display.setFont(&fonts::FreeSans12pt7b);
-  // M5.Display.setTextSize(1);
-
-  // M5.Display.fillRect(0, 0, 240, 135, BLACK);
-  // M5.Display.setCursor(10, 20);
-  // M5.Display.print("Bat:");
 #endif
 
   Serial.begin(115200);
-  vTaskDelay(2000 / portTICK_PERIOD_MS); // Zpoždění pro připojení sériového monitoru
-  ESP_LOGI(TAG, "Spouštím BLE klienta pro SIGMA SPEED 17197...");
+  vTaskDelay(2000 / portTICK_PERIOD_MS); // Delay for serial monitor connection
+  ESP_LOGI(TAG, "Starting BLE client for SIGMA SPEED 17197...");
 
-  // Inicializace BLE
+  // Initialize BLE
   NimBLEDevice::init("");
-  // Vypnutí pairing/šifrování, pokud není potřeba – záleží na zařízení
+  // Disable pairing/encryption if not needed - depends on device
   NimBLEDevice::setSecurityAuth(false, false, false);
 
-  // Nastavení skenování
+  // Setup scanning
   NimBLEScan *pScan = NimBLEDevice::getScan();
   pScan->setScanCallbacks(&scanCallbacks, false);
   pScan->setInterval(45);
@@ -318,7 +306,6 @@ void setup()
   pScan->setActiveScan(true);
   pScan->start(SCAN_TIME_MS, false, false);
 
-  // M5.Display.setFont(&fonts::FreeSans12pt7b);
   canvas.createSprite(M5.Display.width(), M5.Display.height());
   canvas.setTextColor(WHITE);
 
@@ -326,86 +313,76 @@ void setup()
   ledcAttachPin(PWM_GPIO, PWM_CHANNEL);
 
 #ifndef ATOMS3
-  // Inicializace WS2812C-2020 na GPIO35
+  // Initialize WS2812C-2020 on GPIO35
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
   FastLED.clear();
   FastLED.show();
-  // Setup button on GPIO41 for AtomS3
-
 #endif
 
 #ifdef ATOMS3
   pinMode(BTN1, INPUT_PULLUP);
-
 #endif
 }
 
 void loop()
 {
-  // Pokud bylo nalezeno cílové zařízení, pokusíme se o připojení
+  // If target device was found, attempt to connect
   if (doConnect && advDevice)
   {
-    ESP_LOGI(TAG, "Pokus o připojení k cílovému zařízení...");
+    ESP_LOGI(TAG, "Attempting to connect to target device...");
     pClient = NimBLEDevice::createClient();
     pClient->setClientCallbacks(new MyClientCallbacks(), false);
 
     if (!pClient->connect(advDevice))
     {
-      ESP_LOGI(TAG, "Připojení se nezdařilo!");
+      ESP_LOGI(TAG, "Connection failed!");
       NimBLEDevice::getScan()->start(SCAN_TIME_MS, false, false);
       return;
     }
 
-    ESP_LOGI(TAG, "Úspěšně připojeno!");
-    // Hledáme službu CSC (UUID: 1816)
+    ESP_LOGI(TAG, "Successfully connected!");
+    // Look for CSC service (UUID: 1816)
     NimBLERemoteService *pService = pClient->getService(CSC_SERVICE_UUID);
     if (!pService)
     {
-      ESP_LOGI(TAG, "Služba CSC (1816) nebyla nalezena!");
+      ESP_LOGI(TAG, "CSC service (1816) not found!");
       pClient->disconnect();
       return;
     }
 
-    // Hledáme charakteristiku měření (UUID: 2A5B)
+    // Look for measurement characteristic (UUID: 2A5B)
     pCSCCharacteristic = pService->getCharacteristic(CSC_CHAR_UUID);
     if (!pCSCCharacteristic)
     {
-      ESP_LOGI(TAG, "Charakteristika CSC (2A5B) nebyla nalezena!");
+      ESP_LOGI(TAG, "CSC characteristic (2A5B) not found!");
       pClient->disconnect();
       return;
     }
 
-    // Pokud podporuje notifikace, přihlásíme se
+    // If notifications are supported, subscribe
     if (pCSCCharacteristic->canNotify())
     {
-      ESP_LOGI(TAG, "Přihlašuji se na notifikace z CSC charakteristiky...");
+      ESP_LOGI(TAG, "Subscribing to CSC characteristic notifications...");
       pCSCCharacteristic->subscribe(true,
                                     [](NimBLERemoteCharacteristic *pChar, uint8_t *data, size_t length, bool isNotify)
                                     {
-                                      ESP_LOGI(TAG, "Obdržena notifikace, délka: %d", length);
+                                      ESP_LOGI(TAG, "Notification received, length: %d", length);
                                       decodeCSCMeasurement(data, length);
                                     });
     }
     else
     {
-      ESP_LOGI(TAG, "Charakteristika nepodporuje notifikace!");
+      ESP_LOGI(TAG, "Characteristic doesn't support notifications!");
     }
 
-    // Po úspěšném připojení resetujeme příznak
+    // After successful connection, reset flag
     doConnect = false;
   }
 
-  // V hlavní smyčce lze případně zpracovávat další logiku
+  // Main loop can process additional logic here
   drawGUI();
-
-  // speed_kmph += 1;
-  // if (speed_kmph > 40)
-  //   speed_kmph = 0;
-
-  // #endif
   delay(250);
 }
-
 void drawGUI()
 {
   canvas.fillSprite(BLACK);
