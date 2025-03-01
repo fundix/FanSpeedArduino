@@ -18,8 +18,13 @@
 M5Canvas canvas(&M5.Display);
 
 #define BTN1 41
-
 #endif
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Update.h>
+WebServer webServer(80);
+
 // Target device name
 // #define TARGET_DEVICE_NAME "SIGMA SPEED 17197"
 #define TARGET_DEVICE_NAME "SIGMA SPEED"
@@ -37,6 +42,11 @@ const float WHEEL_CIRCUMFERENCE = 2.146; // [m]
 uint32_t previousCumulativeRevs = 0;
 uint16_t previousLastEventTime = 0;
 bool firstMeasurement = true;
+
+void setupWiFiClient();
+void buttonLoop();
+void shortPressed();
+void longPressed();
 
 // PWM definitions
 #define PWM_GPIO 38
@@ -62,6 +72,13 @@ NimBLERemoteCharacteristic *pCSCCharacteristic = nullptr;
 
 float speed_kmph = 0.0f;
 float pwm_percent = 0.0f;
+
+#ifdef ATOMS3
+static unsigned long buttonPressStartTime = 0;
+static bool buttonPressed = false;
+static bool longButtonPressed = false;
+static bool updateStarted = false;
+#endif
 
 void setPWM(float speed);
 void drawGUI();
@@ -115,7 +132,10 @@ class ScanCallbacks : public NimBLEScanCallbacks
     if (advertisedDevice->haveName())
     {
       String devName = advertisedDevice->getName().c_str();
-      ESP_LOGI(TAG, "Device found: %s", devName.c_str());
+      if (devName.length() > 0)
+      {
+        ESP_LOGI(TAG, "Device found: %s", devName.c_str());
+      }
       if (devName.startsWith(TARGET_DEVICE_NAME))
       {
         ESP_LOGI(TAG, "Target device found!");
@@ -322,6 +342,21 @@ void setup()
 #ifdef ATOMS3
   pinMode(BTN1, INPUT_PULLUP);
 #endif
+
+  static TimerHandle_t guiTimer = NULL;
+  if (guiTimer == NULL)
+  {
+    guiTimer = xTimerCreate(
+        "GUITimer",
+        pdMS_TO_TICKS(250),
+        pdTRUE, // Auto reload
+        nullptr,
+        [](TimerHandle_t xTimer)
+        {
+          drawGUI();
+        });
+    xTimerStart(guiTimer, 0);
+  }
 }
 
 void loop()
@@ -380,9 +415,62 @@ void loop()
   }
 
   // Main loop can process additional logic here
-  drawGUI();
-  delay(250);
+
+  delay(10);
+
+  buttonLoop();
 }
+
+void buttonLoop()
+{
+  if (digitalRead(BTN1) == LOW)
+  { // Tlačítko stisknuto (aktivní LOW)
+    if (!buttonPressed)
+    {
+      buttonPressed = true;
+      buttonPressStartTime = millis();
+    }
+    // Pokud držíte tlačítko déle než 2 sekundy a ještě nebyl detekován dlouhý stisk
+    else if (!longButtonPressed && (millis() - buttonPressStartTime > 2000))
+    {
+      longButtonPressed = true;
+      longPressed(); // Zavoláme funkci pro dlouhý stisk
+    }
+  }
+  else
+  { // Tlačítko uvolněno
+    if (buttonPressed)
+    {
+      if (!longButtonPressed)
+      {
+        shortPressed(); // Zavoláme funkci pro krátký stisk
+      }
+      // Resetujeme stav tlačítka
+      buttonPressed = false;
+      longButtonPressed = false;
+    }
+  }
+}
+
+void shortPressed()
+{
+  ESP_LOGI(TAG, "Short button press");
+}
+
+void longPressed()
+{
+  ESP_LOGI(TAG, "Long button press");
+
+  if (updateStarted)
+    return;
+
+  NimBLEDevice::getScan()->stop();
+  NimBLEDevice::deinit(true);
+  setupWiFiClient();
+
+  updateStarted = true;
+}
+
 void drawGUI()
 {
   canvas.fillSprite(BLACK);
@@ -391,33 +479,121 @@ void drawGUI()
   int centerY = canvas.height() / 2;
   int radius = min(centerX, centerY) - 5;
 
-  // Draw background circle
-  // canvas.drawCircle(centerX, centerY, radius, WHITE);
-
-  float comp_speed = speed_kmph > MAX_SPEED ? MAX_SPEED : speed_kmph;
-
-  // Calculate angle based on current speed (0-270 degrees)
-  float angle = (comp_speed / MAX_SPEED) * 270.0f;
-  // angle = 270;
-  // Draw filled arc from -45 to current angle
-  if (speed_kmph > 0)
+  if (updateStarted)
   {
-    canvas.fillArc(centerX, centerY, radius - 17, radius + 5,
-                   135,         // Start at -45 degrees (225 in fillArc coordinates)
-                   135 + angle, // End at calculated angle
-                   RED);
+    canvas.fillArc(centerX, centerY, 58, 90, 0, 360, GREEN);
+    canvas.setTextSize(0.65);
+    canvas.setTextDatum(middle_center);
+    canvas.drawString("Updating", centerX, centerY - 11);
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      IPAddress IP = WiFi.localIP();
+
+      // Vypsání IP na displej (M5Canvas)
+#ifdef ATOMS3
+      canvas.setTextSize(0.5);
+      canvas.setTextDatum(middle_center);
+      canvas.drawString(IP.toString().c_str(), centerX, centerY + 11);
+#endif
+    }
+
+    canvas.pushSprite(0, 0);
+    return;
+  }
+  else
+  {
+    // Draw background circle
+    // canvas.drawCircle(centerX, centerY, radius, WHITE);
+
+    float comp_speed = speed_kmph > MAX_SPEED ? MAX_SPEED : speed_kmph;
+
+    // Calculate angle based on current speed (0-270 degrees)
+    float angle = (comp_speed / MAX_SPEED) * 270.0f;
+    // angle = 270;
+    // Draw filled arc from -45 to current angle
+    if (speed_kmph > 0)
+    {
+      canvas.fillArc(centerX, centerY, radius - 17, radius + 5,
+                     135,         // Start at -45 degrees (225 in fillArc coordinates)
+                     135 + angle, // End at calculated angle
+                     RED);
+    }
+
+    canvas.setFont(&fonts::Font7);
+    canvas.setTextSize(1);
+    canvas.setTextDatum(middle_center);
+    canvas.drawString(String(speed_kmph, 0), centerX, centerY);
+    // canvas.drawString("45", centerX, centerY);
+
+    canvas.setFont(&fonts::FreeSans18pt7b);
+    canvas.setTextSize(0.5);
+    canvas.drawString(String(pwm_percent, 0), centerX, 107);
+    // canvas.drawString("100", centerX - 1, 107);
+
+    canvas.pushSprite(0, 0);
+  }
+}
+
+void setupWiFiClient()
+{
+  // Připojení k WiFi síti
+  WiFi.begin("Vivien", "Bionicman123"); // Nahraď SSID a heslo správnými údaji
+
+  ESP_LOGI(TAG, "Connecting to WiFi...");
+
+  // Čekání na připojení
+  int timeout = 20; // Maximální čas připojení (10 sekund)
+  while (WiFi.status() != WL_CONNECTED && timeout > 0)
+  {
+    delay(500);
+    ESP_LOGI(TAG, ".");
+    timeout--;
   }
 
-  canvas.setFont(&fonts::Font7);
-  canvas.setTextSize(1);
-  canvas.setTextDatum(middle_center);
-  canvas.drawString(String(speed_kmph, 0), centerX, centerY);
-  // canvas.drawString("45", centerX, centerY);
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    ESP_LOGI(TAG, "Connected to WiFi!");
+    IPAddress IP = WiFi.localIP();
+    ESP_LOGI(TAG, "Client IP address: %s", IP.toString().c_str());
 
-  canvas.setFont(&fonts::FreeSans18pt7b);
-  canvas.setTextSize(0.5);
-  canvas.drawString(String(pwm_percent, 0), centerX, 107);
-  // canvas.drawString("100", centerX - 1, 107);
+    webServer.on("/", HTTP_GET, [&webServer]()
+                 {
+    webServer.sendHeader("Connection", "close");
+    webServer.send(200, "text/html",
+    "<form method='POST' action='/update' enctype='multipart/form-data'>"
+    "<input type='file' name='update'>"
+    "<input type='submit' value='Update'>"
+    "</form>"); });
 
-  canvas.pushSprite(0, 0);
+    webServer.on("/update", HTTP_POST, [&webServer]()
+                 {
+    webServer.sendHeader("Connection", "close");
+    webServer.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+    ESP.restart(); }, []()
+                 {
+    HTTPUpload& upload = webServer.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+    ESP_LOGI(TAG, "Update: %s", upload.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+    } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      ESP_LOGI(TAG, "Update Success: %u bytes", upload.totalSize);
+    } else {
+      Update.printError(Serial);
+    }
+    } });
+
+    webServer.begin();
+  }
+  else
+  {
+    ESP_LOGI(TAG, "Failed to connect to WiFi!");
+  }
 }
